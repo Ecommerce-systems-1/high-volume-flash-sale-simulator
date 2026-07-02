@@ -15,7 +15,7 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		Port:         getEnv("PORT", "8080"),
+		Port:         getEnv("PORT", "7860"),
 		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
 		PostgresDSN:  getEnv("POSTGRES_DSN", "postgres://postgres:postgres@localhost:5432/flashsale?sslmode=disable"),
 		DefaultStock: getEnvInt("DEFAULT_STOCK", 100),
