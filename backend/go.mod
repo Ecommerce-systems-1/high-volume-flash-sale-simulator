@@ -1,6 +1,6 @@
 module github.com/Ecommerce-systems-1/flash-sale
 
-go 1.26.4
+go 1.22
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0 // indirect

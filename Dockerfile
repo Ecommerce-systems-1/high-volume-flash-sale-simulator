@@ -1,5 +1,5 @@
 # Stage 1: Build Go backend
-FROM golang:1.22-alpine AS go-builder
+FROM golang:1.26-alpine AS go-builder
 WORKDIR /app/backend
 COPY backend/ .
 RUN go mod download && go build -o /server ./cmd/server/
