@@ -8,6 +8,8 @@ import (
 	"github.com/Ecommerce-systems-1/flash-sale/internal/service"
 )
 
+var StaticDir string
+
 func NewRouter(svc *service.SaleService) http.Handler {
 	mux := http.NewServeMux()
 
@@ -15,11 +17,20 @@ func NewRouter(svc *service.SaleService) http.Handler {
 	mux.HandleFunc("/api/stats", StatsHandler(svc))
 	mux.HandleFunc("/health", HealthHandler)
 
-	// Serve static frontend
-	staticDir := filepath.Join("..", "frontend", "out")
-	if _, err := os.Stat(staticDir); err == nil {
-		fileServer := http.FileServer(http.Dir(staticDir))
-		mux.Handle("/", fileServer)
+	// Try multiple possible static dir locations
+	candidates := []string{
+		StaticDir,
+		filepath.Join("..", "frontend", "out"),
+		"/frontend/out",
+	}
+	for _, d := range candidates {
+		if d != "" {
+			if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+				fileServer := http.FileServer(http.Dir(d))
+				mux.Handle("/", fileServer)
+				break
+			}
+		}
 	}
 
 	return mux
