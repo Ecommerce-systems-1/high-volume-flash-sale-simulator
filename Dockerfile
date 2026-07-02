@@ -20,7 +20,9 @@ COPY --from=go-builder /server /server
 COPY --from=next-builder /app/frontend/out /var/www/html
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
 
-RUN adduser -D -h /home/appuser appuser
+RUN mkdir -p /tmp/nginx /var/lib/nginx/logs && \
+    adduser -D -h /home/appuser appuser && \
+    chown -R appuser:appuser /tmp/nginx /var/lib/nginx /var/www/html
 USER appuser
 
 EXPOSE 7860
