@@ -6,38 +6,26 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Ecommerce-systems-1/flash-sale/internal/config"
-	"github.com/Ecommerce-systems-1/flash-sale/internal/db"
 	"github.com/Ecommerce-systems-1/flash-sale/internal/handlers"
 	"github.com/Ecommerce-systems-1/flash-sale/internal/service"
 )
 
+type mockDB struct{}
+
+func (m *mockDB) CreateOrder(ctx context.Context, saleID int, userID string) (string, error) {
+	return "mock-order-id", nil
+}
+
 func main() {
 	cfg := config.Load()
 
-	// Connect to Redis
-	rdb, err := db.NewRedis(cfg.RedisAddr)
-	if err != nil {
-		log.Fatalf("failed to connect to redis: %v", err)
-	}
-	defer rdb.Close()
-
-	// Connect to PostgreSQL
-	pdb, err := db.NewPostgres(cfg.PostgresDSN)
-	if err != nil {
-		log.Printf("warning: failed to connect to postgres: %v (running without DB)", err)
-	}
-	defer func() {
-		if pdb != nil {
-			pdb.Close()
-		}
-	}()
-
-	// Create sale service
-	svc := service.NewSaleService(rdb.Client(), pdb)
+	store := service.NewSaleStore()
+	svc := service.NewSaleService(store, &mockDB{})
 
 	// Seed default sale
 	ctx := context.Background()
@@ -48,8 +36,26 @@ func main() {
 		log.Printf("seeded default flash sale: id=%d, stock=%d, duration=%ds", saleID, cfg.DefaultStock, cfg.SaleDuration)
 	}
 
-	// Create router
+	// Create router with static file serving
 	router := handlers.NewRouter(svc)
+
+	// Try to serve static frontend files
+	staticDir := filepath.Join("..", "frontend", "out")
+	if _, err := os.Stat(staticDir); err == nil {
+		fileServer := http.FileServer(http.Dir(staticDir))
+		router = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// For API and health routes, use the normal handler
+			if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+				handlers.NewRouter(svc).ServeHTTP(w, r)
+				return
+			}
+			if r.URL.Path == "/health" {
+				handlers.NewRouter(svc).ServeHTTP(w, r)
+				return
+			}
+			fileServer.ServeHTTP(w, r)
+		})
+	}
 
 	// HTTP server
 	srv := &http.Server{

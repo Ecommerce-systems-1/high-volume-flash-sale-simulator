@@ -14,16 +14,10 @@ RUN npm run build
 
 # Stage 3: Production image
 FROM alpine:3.19
-RUN apk add --no-cache nginx
-
+RUN apk add --no-cache ca-certificates
 COPY --from=go-builder /server /server
-COPY --from=next-builder /app/frontend/out /var/www/html
-COPY nginx/nginx.conf /etc/nginx/nginx.conf
-
-RUN mkdir -p /tmp/nginx /var/lib/nginx/logs && \
-    adduser -D -h /home/appuser appuser && \
-    chown -R appuser:appuser /tmp/nginx /var/lib/nginx /var/www/html
+COPY --from=next-builder /app/frontend/out /frontend/out
+RUN adduser -D -h /home/appuser appuser
 USER appuser
-
 EXPOSE 7860
-CMD ["sh", "-c", "/server & nginx -g 'daemon off;'"]
+CMD ["/server"]

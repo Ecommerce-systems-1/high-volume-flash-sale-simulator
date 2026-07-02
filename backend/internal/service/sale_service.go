@@ -3,10 +3,8 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
+	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -18,105 +16,155 @@ type OrderCreator interface {
 	CreateOrder(ctx context.Context, saleID int, userID string) (string, error)
 }
 
-type SaleService struct {
-	rdb *redis.Client
-	dbc OrderCreator
+// SaleStore provides all storage operations using sync.Map (no external Redis/PostgreSQL needed)
+type SaleStore struct {
+	mu         sync.Mutex
+	stock      map[int]int64
+	requests   map[int]int64
+	successes  map[int]int64
+	actives    map[int]time.Time
+	durations  map[int]time.Duration
+	orderCount map[int]int
 }
 
-func NewSaleService(rdb *redis.Client, dbc OrderCreator) *SaleService {
-	return &SaleService{rdb: rdb, dbc: dbc}
-}
-
-func (s *SaleService) AttemptReservation(ctx context.Context, saleID int) (int64, error) {
-	activeKey := fmt.Sprintf("sale:%d:active", saleID)
-	stockKey := fmt.Sprintf("sale:%d:stock", saleID)
-
-	exists, err := s.rdb.Exists(ctx, activeKey).Result()
-	if err != nil {
-		return 0, err
+func NewSaleStore() *SaleStore {
+	return &SaleStore{
+		stock:      make(map[int]int64),
+		requests:   make(map[int]int64),
+		successes:  make(map[int]int64),
+		actives:    make(map[int]time.Time),
+		durations:  make(map[int]time.Duration),
+		orderCount: make(map[int]int),
 	}
-	if exists == 0 {
+}
+
+func (s *SaleStore) InitSale(saleID int, stock int64, duration time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stock[saleID] = stock
+	s.requests[saleID] = 0
+	s.successes[saleID] = 0
+	s.actives[saleID] = time.Now().Add(duration)
+	s.durations[saleID] = duration
+}
+
+func (s *SaleStore) IsActive(saleID int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expiry, ok := s.actives[saleID]
+	if !ok {
+		return false
+	}
+	return time.Now().Before(expiry)
+}
+
+func (s *SaleStore) AttemptReservation(saleID int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check active
+	expiry, ok := s.actives[saleID]
+	if !ok || time.Now().After(expiry) {
 		return 0, ErrSaleExpired
 	}
 
-	remaining, err := s.rdb.Decr(ctx, stockKey).Result()
-	if err != nil {
-		return 0, err
+	// Atomic DECR equivalent
+	stock, ok := s.stock[saleID]
+	if !ok {
+		return 0, ErrSaleExpired
 	}
-	if remaining < 0 {
-		s.rdb.Incr(ctx, stockKey)
+	if stock <= 0 {
 		return 0, ErrSoldOut
 	}
 
-	s.rdb.Incr(ctx, fmt.Sprintf("sale:%d:success", saleID))
-	return remaining, nil
+	s.stock[saleID] = stock - 1
+	s.successes[saleID]++
+	s.requests[saleID]++
+	return stock - 1, nil
+}
+
+func (s *SaleStore) IncrementRequests(saleID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests[saleID]++
+}
+
+func (s *SaleStore) GetStock(saleID int) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stock[saleID]
+}
+
+func (s *SaleStore) GetRequests(saleID int) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests[saleID]
+}
+
+func (s *SaleStore) GetSuccesses(saleID int) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.successes[saleID]
+}
+
+func (s *SaleStore) GetTTL(saleID int) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expiry, ok := s.actives[saleID]
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(expiry).Seconds()
+	if remaining < 0 {
+		return 0
+	}
+	return int64(remaining)
+}
+
+func (s *SaleStore) IncrementOrderCount(saleID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orderCount[saleID]++
+}
+
+type SaleService struct {
+	store *SaleStore
+	dbc   OrderCreator
+}
+
+func NewSaleService(store *SaleStore, dbc OrderCreator) *SaleService {
+	return &SaleService{store: store, dbc: dbc}
+}
+
+func (s *SaleService) AttemptReservation(ctx context.Context, saleID int) (int64, error) {
+	return s.store.AttemptReservation(saleID)
 }
 
 func (s *SaleService) CreateOrderRecord(ctx context.Context, saleID int, userID string) (string, error) {
+	s.store.IncrementOrderCount(saleID)
 	return s.dbc.CreateOrder(ctx, saleID, userID)
 }
 
 func (s *SaleService) GetReserveStats(ctx context.Context, saleID int) (int64, int64, int64, error) {
-	stockKey := fmt.Sprintf("sale:%d:stock", saleID)
-	requestsKey := fmt.Sprintf("sale:%d:requests", saleID)
-	successKey := fmt.Sprintf("sale:%d:success", saleID)
-
-	stock, err := s.rdb.Get(ctx, stockKey).Int64()
-	if err != nil && err != redis.Nil {
-		return 0, 0, 0, err
-	}
-
-	requests, err := s.rdb.Get(ctx, requestsKey).Int64()
-	if err != nil && err != redis.Nil {
-		return 0, 0, 0, err
-	}
-
-	success, err := s.rdb.Get(ctx, successKey).Int64()
-	if err != nil && err != redis.Nil {
-		return 0, 0, 0, err
-	}
-
-	rejectedSoldOut := requests - success
+	stock := s.store.GetStock(saleID)
+	successes := s.store.GetSuccesses(saleID)
+	requests := s.store.GetRequests(saleID)
+	rejectedSoldOut := requests - successes
 	if rejectedSoldOut < 0 {
 		rejectedSoldOut = 0
 	}
-
-	return stock, success, rejectedSoldOut, nil
+	return stock, successes, rejectedSoldOut, nil
 }
 
 func (s *SaleService) GetTTL(ctx context.Context, saleID int) (int64, error) {
-	activeKey := fmt.Sprintf("sale:%d:active", saleID)
-	ttl, err := s.rdb.TTL(ctx, activeKey).Result()
-	if err != nil {
-		return 0, err
-	}
-	return int64(ttl.Seconds()), nil
+	return s.store.GetTTL(saleID), nil
 }
 
 func (s *SaleService) InitSale(ctx context.Context, saleID int, stock int, ttlSeconds int) error {
-	stockKey := fmt.Sprintf("sale:%d:stock", saleID)
-	requestsKey := fmt.Sprintf("sale:%d:requests", saleID)
-	successKey := fmt.Sprintf("sale:%d:success", saleID)
-	activeKey := fmt.Sprintf("sale:%d:active", saleID)
-
-	if err := s.rdb.Set(ctx, stockKey, stock, 0).Err(); err != nil {
-		return err
-	}
-	if err := s.rdb.Set(ctx, requestsKey, 0, 0).Err(); err != nil {
-		return err
-	}
-	if err := s.rdb.Set(ctx, successKey, 0, 0).Err(); err != nil {
-		return err
-	}
-	if err := s.rdb.Set(ctx, activeKey, "1", 0).Err(); err != nil {
-		return err
-	}
-	if err := s.rdb.Expire(ctx, activeKey, time.Duration(ttlSeconds)*time.Second).Err(); err != nil {
-		return err
-	}
+	s.store.InitSale(saleID, int64(stock), time.Duration(ttlSeconds)*time.Second)
 	return nil
 }
 
 func (s *SaleService) IncrementRequests(ctx context.Context, saleID int) {
-	s.rdb.Incr(ctx, fmt.Sprintf("sale:%d:requests", saleID))
+	s.store.IncrementRequests(saleID)
 }
